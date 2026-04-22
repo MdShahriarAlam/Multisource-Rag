@@ -1,0 +1,69 @@
+sources:
+  # --- Structured (SQL) Sources ---
+  - name: company_postgres
+    type: postgresql
+    enabled: true
+    connection:
+      host: ${POSTGRES_HOST}
+      port: ${POSTGRES_PORT}
+      database: ${POSTGRES_DB}
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+
+  - name: analytics_bigquery
+    type: bigquery
+    enabled: false
+    connection:
+      project_id: ${GCP_PROJECT_ID}
+      dataset: ${BIGQUERY_DATASET}
+      credentials_file: ${GOOGLE_APPLICATION_CREDENTIALS}
+
+  - name: azure_sql
+    type: azure_sql
+    enabled: false
+    connection:
+      server: ${AZURE_SQL_SERVER}
+      database: ${AZURE_SQL_DB}
+      username: ${AZURE_SQL_USER}
+      password: ${AZURE_SQL_PASSWORD}
+
+  - name: mysql_db
+    type: mysql
+    enabled: true
+    connection:
+      host: ${MYSQL_HOST}
+      port: ${MYSQL_PORT}
+      database: ${MYSQL_DB}
+      user: ${MYSQL_USER}
+      password: ${MYSQL_PASSWORD}
+
+  # --- Storage (Document) Sources ---
+  - name: local_uploads
+    type: local_file
+    enabled: true
+    connection:
+      upload_dir: "./uploaded_files"
+
+  - name: azure_documents
+    type: azure_blob
+    enabled: false
+    connection:
+      connection_string: ${AZURE_STORAGE_CONNECTION_STRING}
+      container_name: documents
+
+  - name: gcs_documents
+    type: gcs
+    enabled: false
+    connection:
+      project_id: ${GCP_PROJECT_ID}
+      bucket: ${GCS_BUCKET}
+      credentials_file: ${GOOGLE_APPLICATION_CREDENTIALS}
+
+  # --- Document (NoSQL) Sources ---
+  - name: azure_cosmos
+    type: azure_cosmos
+    enabled: false
+    connection:
+      endpoint: ${COSMOS_ENDPOINT}
+      key: ${COSMOS_KEY}
+      database: ${COSMOS_DB}

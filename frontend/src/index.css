@@ -1,0 +1,159 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  background: #0f0f0f;
+  color: rgba(255,255,255,0.90);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Acrylic ────────────────────────────────────────────────────────────── */
+.acrylic {
+  background: rgba(15,15,15,0.88);
+  backdrop-filter: blur(48px) saturate(1.6);
+  -webkit-backdrop-filter: blur(48px) saturate(1.6);
+}
+
+/* ── Gradient mesh background ───────────────────────────────────────────── */
+.mesh-bg {
+  background:
+    radial-gradient(ellipse 60% 40% at 70% 10%, rgba(96,205,255,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 30% at 10% 80%, rgba(167,139,250,0.04) 0%, transparent 55%),
+    #0f0f0f;
+}
+
+/* ── Reveal highlight ───────────────────────────────────────────────────── */
+.reveal {
+  position: relative;
+  overflow: hidden;
+  transition: background 0.12s ease;
+}
+.reveal::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: radial-gradient(circle at var(--x, 50%) var(--y, 50%), rgba(255,255,255,0.07) 0%, transparent 55%);
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.reveal:hover::after { opacity: 1; }
+
+/* ── Focus ring ─────────────────────────────────────────────────────────── */
+.fluent-focus:focus-visible {
+  outline: 2px solid rgba(96,205,255,0.7);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
+/* ── Gradient border utility ────────────────────────────────────────────── */
+.gradient-border {
+  position: relative;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(96,205,255,0.25) 0%, rgba(167,139,250,0.15) 100%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ── Prose ──────────────────────────────────────────────────────────────── */
+.prose {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: rgba(255,255,255,0.88);
+}
+.prose p   { margin: 0 0 0.55em; }
+.prose p:last-child { margin-bottom: 0; }
+.prose ul  { padding-left: 1.2em; margin: 0.4em 0; list-style: disc; }
+.prose ol  { padding-left: 1.2em; margin: 0.4em 0; list-style: decimal; }
+.prose li  { margin-bottom: 0.25em; }
+.prose strong { color: #fff; font-weight: 600; }
+.prose em     { color: rgba(255,255,255,0.65); }
+.prose h1, .prose h2, .prose h3 {
+  color: #fff;
+  font-weight: 600;
+  margin: 0.75em 0 0.35em;
+}
+.prose code {
+  font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+  font-size: 0.8em;
+  background: rgba(96,205,255,0.1);
+  color: #60cdff;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(96,205,255,0.15);
+}
+.prose pre {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.prose pre code {
+  background: transparent;
+  color: rgba(255,255,255,0.82);
+  padding: 0;
+  font-size: 0.82em;
+  border: none;
+}
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83em;
+  margin: 0.6em 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.prose th {
+  padding: 6px 12px;
+  text-align: left;
+  color: rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 0.74em;
+  letter-spacing: 0.05em;
+}
+.prose td {
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.prose tr:last-child td { border-bottom: none; }
+.prose tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* ── Shimmer loader ─────────────────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.08) 50%,
+    rgba(255,255,255,0.04) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.8s infinite;
+}
