@@ -5,6 +5,9 @@ import json
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type
 
+from ..config import settings
+from ..errors import InvalidInput
+
 
 class BaseParser(ABC):
     """Abstract base class for document parsers."""
@@ -112,34 +115,34 @@ class ExcelParser(BaseParser):
         from openpyxl import load_workbook
 
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        segments = []
+        try:
+            segments = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                rows = list(ws.iter_rows(values_only=True))
+                if not rows:
+                    continue
 
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            rows = list(ws.iter_rows(values_only=True))
-            if not rows:
-                continue
+                header = [str(c) if c is not None else "" for c in rows[0]]
+                data_rows = rows[1:]
 
-            header = [str(c) if c is not None else "" for c in rows[0]]
-            data_rows = rows[1:]
-
-            for i in range(0, len(data_rows), self.ROWS_PER_CHUNK):
-                chunk_rows = data_rows[i : i + self.ROWS_PER_CHUNK]
-                lines = [", ".join(header)]
-                for row in chunk_rows:
-                    lines.append(
-                        ", ".join(str(c) if c is not None else "" for c in row)
+                for i in range(0, len(data_rows), self.ROWS_PER_CHUNK):
+                    chunk_rows = data_rows[i : i + self.ROWS_PER_CHUNK]
+                    lines = [", ".join(header)]
+                    for row in chunk_rows:
+                        lines.append(
+                            ", ".join(str(c) if c is not None else "" for c in row)
+                        )
+                    segments.append(
+                        {
+                            "text": "\n".join(lines),
+                            "sheet": sheet_name,
+                            "row_range": f"{i + 1}-{i + len(chunk_rows)}",
+                        }
                     )
-                segments.append(
-                    {
-                        "text": "\n".join(lines),
-                        "sheet": sheet_name,
-                        "row_range": f"{i + 1}-{i + len(chunk_rows)}",
-                    }
-                )
-
-        wb.close()
-        return segments
+            return segments
+        finally:
+            wb.close()
 
 
 class JSONParser(BaseParser):
@@ -185,8 +188,21 @@ class ParserFactory:
         ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         parser_cls = _PARSER_MAP.get(ext)
         if parser_cls is None:
-            raise ValueError(f"No parser available for extension '{ext}'")
+            raise InvalidInput(
+                f"No parser available for extension '{ext}'",
+                details={"filename": filename, "supported": list(_PARSER_MAP.keys())},
+            )
         return parser_cls()
+
+    @staticmethod
+    def parse(filename: str, content: bytes) -> List[Dict[str, str]]:
+        """Parse with size guard. Use this for untrusted input."""
+        if len(content) > settings.max_file_bytes:
+            raise InvalidInput(
+                "File exceeds size limit",
+                details={"max_bytes": settings.max_file_bytes, "got_bytes": len(content)},
+            )
+        return ParserFactory.get_parser(filename).parse(content, filename)
 
     @staticmethod
     def supported_extensions() -> List[str]:

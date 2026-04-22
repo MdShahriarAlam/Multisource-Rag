@@ -3,18 +3,24 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     DataSource,
-    QueryPlan,
-    TableSchema,
+    DocumentSource,
+    IngestionStatus,
     MCPToolRequest,
-    MCPToolResponse
+    MCPToolResponse,
+    QueryType,
+    SourceStatus,
+    TableSchema,
 )
 
 __all__ = [
     "ChatRequest",
     "ChatResponse",
     "DataSource",
-    "QueryPlan",
-    "TableSchema",
+    "DocumentSource",
+    "IngestionStatus",
     "MCPToolRequest",
-    "MCPToolResponse"
+    "MCPToolResponse",
+    "QueryType",
+    "SourceStatus",
+    "TableSchema",
 ]

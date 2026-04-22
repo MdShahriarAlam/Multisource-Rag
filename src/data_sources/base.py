@@ -31,6 +31,14 @@ class BaseConnector(ABC):
         except Exception:
             return False
 
+    async def health_check(self) -> bool:
+        """Lightweight liveness check. Override for DB-specific probes.
+
+        Default impl returns True — connectors with real backends should
+        override to run a trivial query (e.g. ``SELECT 1``).
+        """
+        return True
+
 
 class StructuredConnector(BaseConnector):
     """Base for SQL/queryable database connectors (Postgres, BigQuery, Azure SQL)."""

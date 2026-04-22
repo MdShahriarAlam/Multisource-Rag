@@ -1,7 +1,10 @@
 """Connector registry — plugin-style system for data source connectors."""
+import logging
 from typing import Any, Dict, List, Optional, Type
 
 from .base import BaseConnector
+
+log = logging.getLogger(__name__)
 
 
 # Global type registry: maps source type string -> connector class
@@ -42,9 +45,9 @@ class ConnectorRegistry:
 
             cls = _CONNECTOR_TYPES.get(source_type)
             if cls is None:
-                print(
-                    f"Warning: No connector registered for type '{source_type}' "
-                    f"(source '{name}'). Skipping."
+                log.warning(
+                    "No connector registered for type '%s' (source '%s'). Skipping.",
+                    source_type, name,
                 )
                 continue
 
@@ -98,21 +101,32 @@ class ConnectorRegistry:
         ]
 
     async def connect_all(self) -> Dict[str, bool]:
-        """Connect all registered connectors. Returns name -> success."""
-        results = {}
+        """Connect all registered connectors. Returns name -> success. Fail-soft."""
+        results: Dict[str, bool] = {}
         for name, conn in self._connectors.items():
             try:
                 await conn.connect()
                 results[name] = True
-            except Exception as e:
-                print(f"Failed to connect '{name}': {e}")
+            except Exception:
+                log.exception("Failed to connect source '%s'", name)
                 results[name] = False
         return results
 
     async def disconnect_all(self) -> None:
-        """Disconnect all connectors."""
-        for conn in self._connectors.values():
+        """Disconnect all connectors. Logs per-connector failures, never raises."""
+        for name, conn in self._connectors.items():
             try:
                 await conn.disconnect()
             except Exception:
-                pass
+                log.exception("Failed to disconnect source '%s'", name)
+
+    async def health_check_all(self) -> Dict[str, bool]:
+        """Run ``health_check()`` on every connector. Returns name -> healthy."""
+        results: Dict[str, bool] = {}
+        for name, conn in self._connectors.items():
+            try:
+                results[name] = bool(await conn.health_check())
+            except Exception:
+                log.exception("Health check failed for '%s'", name)
+                results[name] = False
+        return results

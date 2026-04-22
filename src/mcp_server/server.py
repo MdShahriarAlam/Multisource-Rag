@@ -1,47 +1,64 @@
-"""MCP Server implementation with dynamic connector registry."""
+"""Standalone MCP server — optional external entrypoint.
+
+The main FastAPI app (``src.main``) calls :class:`MCPHandler` in-process and
+does NOT depend on this server. Run this only when exposing the MCP interface
+to external clients (``python -m src.mcp_server.server``).
+"""
+from __future__ import annotations
+
+import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import load_sources_config, settings
 from ..data_sources.registry import ConnectorRegistry
+from ..errors import (
+    NotInitialized,
+    RAGError,
+    rag_error_handler,
+    unhandled_exception_handler,
+)
+from ..logging_config import configure_logging
 from ..models.schemas import MCPToolRequest, MCPToolResponse
 from .handlers import MCPHandler
 from .tools import build_tool_definitions
 
-# Import connectors to trigger @register decorators
+# Trigger @register decorators
 import src.data_sources  # noqa: F401
 
-# Global state
-mcp_handler: MCPHandler = None
-mcp_tools = []
+configure_logging()
+log = logging.getLogger(__name__)
+
+
+class _State:
+    handler: Optional[MCPHandler] = None
+    tools: list = []
+
+
+state = _State()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan."""
-    global mcp_handler, mcp_tools
-
-    # Build registry from config
     registry = ConnectorRegistry()
     sources = load_sources_config()
     registry.load_from_config(sources)
 
-    # Connect all sources
     results = await registry.connect_all()
-    for name, success in results.items():
-        status = "connected" if success else "FAILED"
-        print(f"  [{status}] {name}")
+    for name, ok in results.items():
+        log.info("Source %s: %s", name, "connected" if ok else "degraded")
 
-    # Build tools and handler
-    mcp_tools = build_tool_definitions(registry)
-    mcp_handler = MCPHandler(registry)
+    state.tools = build_tool_definitions(registry)
+    state.handler = MCPHandler(registry)
 
     yield
 
-    await mcp_handler.cleanup()
+    if state.handler is not None:
+        await state.handler.cleanup()
 
 
 app = FastAPI(
@@ -53,11 +70,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+app.add_exception_handler(RAGError, rag_error_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
 @app.get("/")
@@ -71,30 +91,34 @@ async def root():
 
 @app.get("/tools")
 async def list_tools():
-    return {"tools": mcp_tools}
+    return {"tools": state.tools}
 
 
 @app.post("/tools/execute", response_model=MCPToolResponse)
-async def execute_tool(request: MCPToolRequest):
-    global mcp_handler
-    if not mcp_handler:
-        raise HTTPException(status_code=500, detail="MCP handler not initialized")
-    result = await mcp_handler.handle_tool_call(request.tool_name, request.parameters)
+async def execute_tool(request: MCPToolRequest) -> MCPToolResponse:
+    if state.handler is None:
+        raise NotInitialized("MCP handler not initialized")
+    result = await state.handler.handle_tool_call(request.tool_name, request.parameters)
     return MCPToolResponse(**result)
 
 
 @app.get("/sources")
 async def list_sources():
-    """List all connected data sources."""
-    global mcp_handler
-    if not mcp_handler:
+    if state.handler is None:
         return {"sources": []}
-    return {"sources": mcp_handler.registry.list_sources()}
+    return {"sources": state.handler.registry.list_sources()}
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    if state.handler is None:
+        return {"status": "starting"}
+    results = await state.handler.registry.health_check_all()
+    degraded = any(not v for v in results.values())
+    return {
+        "status": "degraded" if degraded else "healthy",
+        "sources": results,
+    }
 
 
 def main():
@@ -102,7 +126,8 @@ def main():
         "src.mcp_server.server:app",
         host=settings.mcp_server_host,
         port=settings.mcp_server_port,
-        reload=True,
+        reload=(settings.env != "prod"),
+        log_level=settings.log_level.lower(),
     )
 
 

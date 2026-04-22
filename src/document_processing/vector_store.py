@@ -2,8 +2,6 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import chromadb
-
 from ..config import settings
 from .chunker import DocumentChunk
 
@@ -23,6 +21,8 @@ class ChromaVectorStore:
     COLLECTION_NAME = "multisource_rag"
 
     def __init__(self, persist_dir: str = None):
+        import chromadb  # lazy — heavy import with transitive native deps
+
         self.persist_dir = persist_dir or settings.chroma_persist_dir
         self.client = chromadb.PersistentClient(path=self.persist_dir)
         self.collection = self.client.get_or_create_collection(

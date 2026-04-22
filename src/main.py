@@ -1,87 +1,128 @@
-"""Main FastAPI application for the multi-source RAG chatbot."""
-import threading
+"""FastAPI application — multi-source RAG chatbot."""
+from __future__ import annotations
+
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+from .agents import AgentOrchestrator
 from .config import load_sources_config, settings
 from .data_sources.registry import ConnectorRegistry
 from .document_processing.ingestion import IngestionPipeline
-from .document_processing.vector_store import ChromaVectorStore
-from .models.schemas import ChatRequest, ChatResponse, IngestionStatus
-from .agents import AgentOrchestrator
+from .errors import (
+    FileNotFound,
+    InvalidInput,
+    NotInitialized,
+    PathTraversal,
+    RAGError,
+    rag_error_handler,
+    unhandled_exception_handler,
+)
+from .logging_config import configure_logging
+from .mcp_server.handlers import MCPHandler
+from .models.schemas import ChatRequest, ChatResponse, IngestionStatus, SourceStatus
 
-# Import connectors to trigger @register decorators
+# Trigger @register decorators
 import src.data_sources  # noqa: F401
 
-# Global state
-orchestrator: AgentOrchestrator = None
-ingestion_pipeline: IngestionPipeline = None
-registry: ConnectorRegistry = None
-_mcp_thread: threading.Thread = None
+configure_logging()
+log = logging.getLogger(__name__)
 
 
-def _run_mcp_server():
-    """Run the MCP server in a background thread (no reload — lives inside main process)."""
-    uvicorn.run(
-        "src.mcp_server.server:app",
-        host=settings.mcp_server_host,
-        port=settings.mcp_server_port,
-        reload=False,
-        log_level=settings.log_level.lower(),
-    )
+# ── Application state ───────────────────────────────────────────────────────
 
+class AppState:
+    registry: Optional[ConnectorRegistry] = None
+    handler: Optional[MCPHandler] = None
+    orchestrator: Optional[AgentOrchestrator] = None
+    ingestion_pipeline: Optional[IngestionPipeline] = None
+    source_health: dict[str, bool] = {}
+
+
+state = AppState()
+
+
+def _upload_dir() -> Path:
+    return Path(settings.upload_dir).resolve()
+
+
+def _safe_upload_path(filename: str) -> Path:
+    """Reject traversal: keep basename only, ensure result stays inside upload_dir."""
+    if not filename or filename in (".", ".."):
+        raise PathTraversal("Invalid filename", details={"filename": filename})
+    base = Path(filename).name
+    if not base or base != filename or ".." in base:
+        raise PathTraversal("Filename must not contain path separators", details={"filename": filename})
+    root = _upload_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = (root / base).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as e:
+        raise PathTraversal("Path escapes upload directory", details={"filename": filename}) from e
+    return candidate
+
+
+# ── Lifespan ────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global orchestrator, ingestion_pipeline, registry, _mcp_thread
+    log.info("Starting Multi-Source RAG Chatbot v2.0 (env=%s)", settings.env)
 
-    # Start MCP server in a background daemon thread
-    _mcp_thread = threading.Thread(target=_run_mcp_server, daemon=True, name="mcp-server")
-    _mcp_thread.start()
-    print(f"MCP server starting on http://{settings.mcp_server_host}:{settings.mcp_server_port}")
+    # Build registry + load sources
+    state.registry = ConnectorRegistry()
+    try:
+        sources = load_sources_config()
+    except Exception:
+        log.exception("Failed to load sources.yaml")
+        sources = []
+    state.registry.load_from_config(sources)
 
-    # Build registry
-    registry = ConnectorRegistry()
-    sources = load_sources_config()
-    registry.load_from_config(sources)
+    # Fail-soft connect — app starts even if individual sources are down
+    results = await state.registry.connect_all()
+    state.source_health = results
+    for name, ok in results.items():
+        if ok:
+            log.info("Connected source: %s", name)
+        else:
+            log.warning("Source degraded (connect failed): %s", name)
 
-    # Initialize orchestrator
-    orchestrator = AgentOrchestrator()
+    # In-process MCP handler + orchestrator (no HTTP hop, no daemon thread)
+    state.handler = MCPHandler(state.registry)
+    state.orchestrator = AgentOrchestrator(state.handler)
 
-    # Initialize ingestion pipeline
-    ingestion_pipeline = IngestionPipeline(registry)
+    state.ingestion_pipeline = IngestionPipeline(state.registry)
 
-    # Auto-ingest any files already sitting in the uploaded_files/ folder
-    # so they are searchable without requiring a manual upload trigger.
-    upload_dir = Path("./uploaded_files")
+    # Auto-ingest files sitting in upload dir so they are searchable on boot
+    upload_dir = _upload_dir()
     if upload_dir.exists() and any(upload_dir.iterdir()):
-        print("Auto-ingesting files in uploaded_files/ ...")
-        result = await ingestion_pipeline.ingest_source("local_uploads")
-        processed = result.get("files_processed", 0)
-        skipped   = result.get("files_skipped", 0)
-        chunks    = result.get("chunks_created", 0)
-        print(f"  -> {processed} file(s) processed, {skipped} skipped, {chunks} chunks indexed")
+        log.info("Auto-ingesting files in %s", upload_dir)
+        try:
+            result = await state.ingestion_pipeline.ingest_source("local_uploads")
+            log.info(
+                "Auto-ingest done: %d processed, %d skipped, %d chunks",
+                result.get("files_processed", 0),
+                result.get("files_skipped", 0),
+                result.get("chunks_created", 0),
+            )
+        except Exception:
+            log.exception("Auto-ingest failed")
 
-    print("=" * 60)
-    print("Multi-Source RAG Chatbot v2.0")
-    print("=" * 60)
-    print(f"OpenAI Model: {settings.openai_model}")
-    print(f"Sources loaded: {len(registry.get_all())}")
-    for info in registry.list_sources():
-        print(f"  - {info['name']} ({info['type']})")
-    print(f"MCP Server: http://{settings.mcp_server_host}:{settings.mcp_server_port}")
-    print(f"Chatbot API: http://{settings.app_host}:{settings.app_port}")
-    print("=" * 60)
+    log.info("Model=%s  sources=%d", settings.openai_model, len(state.registry.get_all()))
 
     yield
 
-    # MCP thread is a daemon — it exits automatically when the main process exits
-    print("Shutting down...")
+    log.info("Shutting down — disconnecting sources")
+    if state.registry is not None:
+        await state.registry.disconnect_all()
 
+
+# ── App construction ────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Multi-Source RAG Chatbot",
@@ -92,12 +133,37 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
+app.add_exception_handler(RAGError, rag_error_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _require_orchestrator() -> AgentOrchestrator:
+    if state.orchestrator is None:
+        raise NotInitialized("Orchestrator not initialized")
+    return state.orchestrator
+
+
+def _require_pipeline() -> IngestionPipeline:
+    if state.ingestion_pipeline is None:
+        raise NotInitialized("Ingestion pipeline not initialized")
+    return state.ingestion_pipeline
+
+
+def _require_registry() -> ConnectorRegistry:
+    if state.registry is None:
+        raise NotInitialized("Registry not initialized")
+    return state.registry
+
+
+# ── Routes ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
@@ -116,128 +182,128 @@ async def root():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """Process a chat message through the hybrid RAG pipeline."""
-    if not orchestrator:
-        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
-    try:
-        # If the user attached a file, prepend a directive so the agent searches
-        # that document first, then cross-references the connected databases.
-        if request.context and request.context.get("uploaded_file"):
-            filename = request.context["uploaded_file"]
-            prefix = (
-                f"IMPORTANT: The user has just uploaded '{filename}'. "
-                f"Your FIRST tool call MUST be: search_documents(query='invoice customer order details products') "
-                f"— do NOT call list_files or list_tables first. "
-                f"After reading the document content, extract all key fields "
-                f"(customer name, email, order ID, product IDs, amounts, dates), "
-                f"then query the SQL databases to find matching records and cross-reference. "
-                f"Combine both sources into one coherent answer.\n\n"
-                f"User question: "
-            )
-            augmented = request.model_copy(update={"message": prefix + request.message})
-            return await orchestrator.process_chat(augmented)
-        return await orchestrator.process_chat(request)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {e}")
+async def chat(request: ChatRequest) -> ChatResponse:
+    orch = _require_orchestrator()
+    if request.context and request.context.get("uploaded_file"):
+        filename = request.context["uploaded_file"]
+        prefix = (
+            f"IMPORTANT: The user has just uploaded '{filename}'. "
+            f"Your FIRST tool call MUST be: search_documents(query='invoice customer order details products') "
+            f"— do NOT call list_files or list_tables first. "
+            f"After reading the document content, extract all key fields "
+            f"(customer name, email, order ID, product IDs, amounts, dates), "
+            f"then query the SQL databases to find matching records and cross-reference. "
+            f"Combine both sources into one coherent answer.\n\n"
+            f"User question: "
+        )
+        augmented = request.model_copy(update={"message": prefix + request.message})
+        return await orch.process_chat(augmented)
+    return await orch.process_chat(request)
 
 
 @app.get("/api/history/{session_id}")
 async def get_history(session_id: str):
-    if not orchestrator:
-        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
-    history = orchestrator.get_conversation_history(session_id)
+    orch = _require_orchestrator()
+    history = orch.get_conversation_history(session_id)
     return {"session_id": session_id, "history": history, "message_count": len(history)}
 
 
 @app.delete("/api/history/{session_id}/clear")
 async def clear_history(session_id: str):
-    if not orchestrator:
-        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
-    orchestrator.clear_conversation_history(session_id)
+    orch = _require_orchestrator()
+    orch.clear_conversation_history(session_id)
     return {"session_id": session_id, "status": "cleared"}
 
 
 @app.get("/api/sources")
 async def list_sources():
-    """List all connected data sources."""
-    if not registry:
+    registry = state.registry
+    if registry is None:
         return {"sources": []}
-    return {"sources": registry.list_sources()}
+    out = []
+    for info in registry.list_sources():
+        name = info["name"]
+        out.append(
+            SourceStatus(
+                name=name,
+                type=info["type"],
+                connector_class=info["connector_class"],
+                connected=bool(state.source_health.get(name, False)),
+            ).model_dump()
+        )
+    return {"sources": out}
 
 
 @app.post("/api/ingest")
 async def ingest_all():
-    """Trigger document ingestion from all storage sources."""
-    if not ingestion_pipeline:
-        raise HTTPException(status_code=500, detail="Ingestion pipeline not initialized")
-    results = await ingestion_pipeline.ingest_all()
+    pipeline = _require_pipeline()
+    results = await pipeline.ingest_all()
     return {"status": "completed", "results": results}
 
 
 @app.post("/api/ingest/{source_name}")
 async def ingest_source(source_name: str):
-    """Trigger document ingestion from a single storage source."""
-    if not ingestion_pipeline:
-        raise HTTPException(status_code=500, detail="Ingestion pipeline not initialized")
-    result = await ingestion_pipeline.ingest_source(source_name)
+    pipeline = _require_pipeline()
+    result = await pipeline.ingest_source(source_name)
     return {"status": "completed", "result": result}
 
 
 @app.get("/api/ingest/status", response_model=IngestionStatus)
-async def ingest_status():
-    """Get ingestion pipeline status."""
-    if not ingestion_pipeline:
+async def ingest_status() -> IngestionStatus:
+    if state.ingestion_pipeline is None:
         return IngestionStatus()
-    return IngestionStatus(**ingestion_pipeline.get_status())
-
-
-_UPLOAD_DIR = Path("./uploaded_files")
-_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx", ".json"}
+    return IngestionStatus(**state.ingestion_pipeline.get_status())
 
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """Upload a document to the local uploads folder and ingest it immediately."""
-    if not ingestion_pipeline:
-        raise HTTPException(status_code=500, detail="Ingestion pipeline not initialized")
+    pipeline = _require_pipeline()
 
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in _ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{suffix}'. Allowed: {sorted(_ALLOWED_EXTENSIONS)}",
+    if not file.filename:
+        raise InvalidInput("Missing filename")
+
+    dest = _safe_upload_path(file.filename)
+    safe_name = dest.name
+
+    suffix = dest.suffix.lower()
+    allowed = settings.allowed_upload_extensions_set
+    if suffix not in allowed:
+        raise InvalidInput(
+            f"Unsupported file type '{suffix}'",
+            details={"allowed": sorted(allowed)},
         )
 
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = _UPLOAD_DIR / file.filename
     content = await file.read()
+    if len(content) > settings.max_file_bytes:
+        raise InvalidInput(
+            "File exceeds size limit",
+            details={"max_bytes": settings.max_file_bytes, "got_bytes": len(content)},
+        )
+
     dest.write_bytes(content)
 
-    # Clear ingestion state for this file so it is always re-processed
-    state = ingestion_pipeline._state.setdefault("sources", {}).setdefault("local_uploads", {})
-    state.pop(file.filename, None)
-    ingestion_pipeline._save_state()
+    # Force re-ingest: clear state entry for this filename
+    src_state = pipeline._state.setdefault("sources", {}).setdefault("local_uploads", {})
+    src_state.pop(safe_name, None)
 
-    result = await ingestion_pipeline.ingest_source("local_uploads")
-    chunks_created = result.get("chunks_created", 0)
-
+    result = await pipeline.ingest_source("local_uploads")
     return {
         "status": "ingested",
-        "filename": file.filename,
-        "chunks_created": chunks_created,
+        "filename": safe_name,
+        "chunks_created": result.get("chunks_created", 0),
     }
 
 
 @app.get("/api/upload/files")
 async def list_uploaded_files():
-    """List files in the local upload folder."""
-    if not _UPLOAD_DIR.exists():
+    upload_dir = _upload_dir()
+    if not upload_dir.exists():
         return {"files": []}
 
+    allowed = settings.allowed_upload_extensions_set
     files = []
-    for path in sorted(_UPLOAD_DIR.iterdir()):
-        if path.is_file() and path.suffix.lower() in _ALLOWED_EXTENSIONS:
+    for path in sorted(upload_dir.iterdir()):
+        if path.is_file() and path.suffix.lower() in allowed:
             stat = path.stat()
             files.append({"name": path.name, "size": stat.st_size})
     return {"files": files}
@@ -245,31 +311,26 @@ async def list_uploaded_files():
 
 @app.delete("/api/upload/{filename}")
 async def delete_uploaded_file(filename: str):
-    """Remove an uploaded file from disk. Vector embeddings are kept in ChromaDB."""
-    target = _UPLOAD_DIR / filename
+    target = _safe_upload_path(filename)
     if not target.exists():
-        raise HTTPException(status_code=404, detail=f"File '{filename}' not found")
-
+        raise FileNotFound(f"File '{target.name}' not found")
     target.unlink()
-    return {"status": "deleted", "filename": filename, "vectors": "preserved"}
+    return {"status": "deleted", "filename": target.name, "vectors": "preserved"}
 
 
 @app.post("/api/vector/clear")
 async def clear_vector_store():
-    """Wipe all vector embeddings from ChromaDB, reset ingestion state, and delete uploaded files."""
-    if not ingestion_pipeline:
-        raise HTTPException(status_code=500, detail="Ingestion pipeline not initialized")
+    pipeline = _require_pipeline()
+    pipeline.vector_store.clear_all()
+    pipeline._state = {"sources": {}}
+    pipeline._save_state()
 
-    # Clear ChromaDB
-    ingestion_pipeline.vector_store.clear_all()
-    ingestion_pipeline._state = {"sources": {}}
-    ingestion_pipeline._save_state()
-
-    # Delete all files from the upload folder so they don't get re-indexed on next startup
     deleted_files = []
-    if _UPLOAD_DIR.exists():
-        for f in _UPLOAD_DIR.iterdir():
-            if f.is_file() and f.suffix.lower() in _ALLOWED_EXTENSIONS:
+    upload_dir = _upload_dir()
+    allowed = settings.allowed_upload_extensions_set
+    if upload_dir.exists():
+        for f in upload_dir.iterdir():
+            if f.is_file() and f.suffix.lower() in allowed:
                 f.unlink()
                 deleted_files.append(f.name)
 
@@ -278,25 +339,55 @@ async def clear_vector_store():
 
 @app.get("/api/stats")
 async def get_stats():
-    if not orchestrator:
-        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
-    total_sessions = len(orchestrator.conversation_history)
-    total_messages = sum(len(h) for h in orchestrator.conversation_history.values())
-    vector_stats = ChromaVectorStore().get_stats() if ingestion_pipeline else {}
+    orch = _require_orchestrator()
+    registry = _require_registry()
+    total_sessions = len(orch.conversation_history)
+    total_messages = sum(len(h) for h in orch.conversation_history.values())
+    vector_stats = (
+        state.ingestion_pipeline.vector_store.get_stats()
+        if state.ingestion_pipeline is not None
+        else {}
+    )
     return {
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "vector_store": vector_stats,
-        "connected_sources": len(registry.get_all()) if registry else 0,
+        "connected_sources": sum(1 for v in state.source_health.values() if v),
+        "total_sources": len(registry.get_all()),
     }
 
 
 @app.get("/health")
 async def health_check():
+    registry = state.registry
+    if registry is None:
+        return {"status": "starting", "service": "chatbot-api", "sources": {}}
+
+    per_source = {}
+    degraded = False
+    for name, conn in registry.get_all().items():
+        connected = bool(state.source_health.get(name, False))
+        healthy: Optional[bool] = None
+        error: Optional[str] = None
+        if connected and hasattr(conn, "health_check"):
+            try:
+                healthy = bool(await conn.health_check())  # type: ignore[attr-defined]
+            except Exception as e:
+                healthy = False
+                error = str(e)
+        per_source[name] = {
+            "connected": connected,
+            "healthy": healthy,
+            "error": error,
+            "type": conn.source_type,
+        }
+        if not connected or healthy is False:
+            degraded = True
+
     return {
-        "status": "healthy",
+        "status": "degraded" if degraded else "healthy",
         "service": "chatbot-api",
-        "sources": len(registry.get_all()) if registry else 0,
+        "sources": per_source,
     }
 
 
@@ -305,7 +396,7 @@ def main():
         "src.main:app",
         host=settings.app_host,
         port=settings.app_port,
-        reload=False,
+        reload=(settings.env != "prod"),
         log_level=settings.log_level.lower(),
     )
 

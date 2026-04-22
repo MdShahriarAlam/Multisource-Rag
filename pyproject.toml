@@ -47,12 +47,27 @@ chromadb = "^0.4.22"
 
 # Utilities
 requests = "^2.31.0"
+tenacity = "^8.2.0"
+sqlparse = "^0.4.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 pytest-asyncio = "^0.23.0"
 black = "^24.1.0"
 ruff = "^0.2.0"
+mypy = "^1.8.0"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
 
 [build-system]
 requires = ["poetry-core"]

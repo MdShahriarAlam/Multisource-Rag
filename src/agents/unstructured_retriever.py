@@ -1,10 +1,14 @@
 """Unstructured retriever — handles vector-based document retrieval."""
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from ..config import settings
 from ..document_processing.embedder import OpenAIEmbedder
 from ..document_processing.vector_store import ChromaVectorStore, SearchResult
 from ..models.schemas import DocumentSource
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,6 +57,7 @@ class UnstructuredRetriever:
                 n_results=n_results,
             )
         except Exception as e:
+            log.exception("Vector search failed")
             result.reasoning_steps.append(f"Vector search error: {e}")
             return result
 
@@ -60,31 +65,29 @@ class UnstructuredRetriever:
             result.reasoning_steps.append("No relevant documents found")
             return result
 
-        # Filter by relevance threshold
-        relevant = [r for r in search_results if r.score > 0.3]
+        threshold = settings.unstructured_relevance_threshold
+        relevant = [r for r in search_results if r.score >= threshold]
         result.chunks = relevant
 
-        # Build document source references
-        seen_files = set()
+        # Dedupe by (source, file_path) — keep highest-scoring chunk per file
+        best: Dict[Tuple[str, str], DocumentSource] = {}
         for chunk in relevant:
             source_name = chunk.metadata.get("source_name", "unknown")
             file_path = chunk.metadata.get("file_path", "unknown")
-            key = f"{source_name}:{file_path}"
-
-            result.document_sources.append(
-                DocumentSource(
-                    source=source_name,
-                    file_path=file_path,
-                    chunk_text=chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text,
-                    relevance_score=chunk.score,
-                )
+            key = (source_name, file_path)
+            snippet = chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text
+            candidate = DocumentSource(
+                source=source_name,
+                file_path=file_path,
+                chunk_text=snippet,
+                relevance_score=chunk.score,
             )
+            if key not in best or candidate.relevance_score > best[key].relevance_score:
+                best[key] = candidate
 
-            if key not in seen_files:
-                seen_files.add(key)
-
+        result.document_sources = list(best.values())
         result.reasoning_steps.append(
-            f"Found {len(relevant)} relevant chunks from {len(seen_files)} file(s)"
+            f"Found {len(relevant)} relevant chunks from {len(best)} file(s)"
         )
         return result
 
