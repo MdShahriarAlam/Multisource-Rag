@@ -23,20 +23,41 @@ wheels/
 .installed.cfg
 *.egg
 
-# Environment
+# Environment — block all variants, whitelist only the example template
 .env
+.env.*
+!.env.example
+*.env
 .venv
 
 # IDE
 .vscode/
 .idea/
+.claude/
+CLAUDE.md
 *.swp
 *.swo
 *~
 
-# GCP
+# GCP credentials
 *-key.json
 service-account*.json
+gcp-credentials*.json
+application_default_credentials.json
+
+# Azure credentials
+*.publishsettings
+azureauth.json
+azure_credentials.json
+*.azureauth
+
+# Certificates & private keys
+*.pem
+*.p12
+*.pfx
+*.key
+*.crt
+*.cer
 
 # Logs
 *.log
@@ -52,6 +73,18 @@ chroma_data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Uploaded user documents (runtime data, not source code)
+uploaded_files/
+
+# Sample / generated PDFs
+*.pdf
+
+# Node (frontend)
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
 
 # OS
 .DS_Store
